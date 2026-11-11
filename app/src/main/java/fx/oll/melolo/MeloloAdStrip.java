@@ -8,6 +8,7 @@ import android.webkit.WebView;
 import java.lang.reflect.Method;
 import java.net.InetAddress;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.Locale;
 import java.util.Set;
@@ -21,13 +22,16 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
 /**
  * LSPosed module: strips ads out of Melolo (com.worldance.drama).
  *
- * Confirmed targets on device, Android 16 / POCO X3 Pro:
+ * Confirmed targets on device, Android 17 / POCO X3 Pro, Melolo 5.5.2 (Play Store):
  *   - app ad module   com.worldance.novel.advert.*  (ads, seriesad, splashad, ugad, webads, ...)
  *   - primary SDK     com.bytedance.sdk.openadsdk.* (Pangle + mediation adapters)
  *   - secondary SDKs  com.google.android.gms.ads.*, com.facebook.ads.*
  *
  * Layers:
- *   1. view killer  - ViewGroup.addView drops ad views, onResume sweeps leftovers
+ *   1. view hider   - ad views are collapsed to 0x0 and set GONE, never refused.
+ *                     v1.0 refused addView, which broke layout inflation:
+ *                     SeriesContentMaskView.<init> NPEs on findViewById when a
+ *                     child it expects was never attached.
  *   2. SDK neuter   - load and show methods on ad SDK classes become no-ops
  *   3. host sink    - ad domains resolve to 127.0.0.1
  *   4. discovery    - every matched class is logged for tuning
@@ -74,33 +78,41 @@ public class MeloloAdStrip implements IXposedHookLoadPackage {
     };
 
     /** Obfuscated SDK guts: thousands of classes, hook storm for little gain.
-     *  View blocking plus the DNS sink in layer 1/3 already covers these. */
+     *  View hiding plus the DNS sink in layer 1/3 already covers these. */
     private static final String[] HOOK_SKIP = {
             "com.facebook.ads.redexgen.",
             "com.google.android.gms.ads.internal."
     };
 
-    /** App-side ad code: view classes here are blocked, methods are left alone. */
+    /** App-side ad code: view classes here are hidden, methods are left alone. */
     private static final String[] APP_AD_PACKAGES = {
             "com.worldance.novel.advert.",
             "com.worldance.novel.feature.series.insertpage.nativead."
     };
 
-    /** Lowercased class-name fragments that mean "this is an ad container". */
-    private static final String[] AD_CLASS_KEYWORDS = {
-            "adview", "adcontainer", "adlayout", "adbanner", "adframe", "adslot",
-            "adbox", "adspace", "adspot", "adholder", "adwrapper", "adstub",
-            "adplaceholder", "adplaceholderholder", "nativead", "nativeadlayout",
-            "feedad", "splashad", "bannerad", "interstitial", "rewarded",
-            "appopenad", "adsdk", "adloader", "admanager", "adrequest",
-            "advert", "adsplash", "advip"
-    };
+    /**
+     * Whole words that mean "this view is an ad", matched against the class name
+     * split on non-alphanumerics. Substring matching was the v1.0 bug: plain
+     * text views with ids like "series_head_ad_tag" got dropped out of the layout.
+     */
+    private static final Set<String> AD_WORDS = Collections.unmodifiableSet(
+            new HashSet<>(Arrays.asList(
+                    "ad", "ads", "adv", "advert", "adverts", "advertise", "advertisement",
+                    "adview", "adviews", "adsview", "adcontainer", "adlayout", "adbanner",
+                    "adslot", "adbox", "adspace", "adspot", "adholder", "adwrapper",
+                    "adstub", "adframe", "admask", "adlayer", "adcard", "adfeed",
+                    "nativead", "splashad", "bannerad", "feedad", "appopenad",
+                    "interstitial", "rewarded", "adsdk", "adloader", "admanager",
+                    "adrequest", "advip"
+            )));
 
-    /** Lowercased resource-entry fragments for ad layout ids. */
-    private static final String[] AD_ID_KEYWORDS = {
-            "ad_", "_ad", "advert", "native_ad", "ad_container", "ad_layout",
-            "ad_view", "ad_banner", "ad_card", "ad_slot", "splash_ad", "feed_ad"
-    };
+    /** Non-container views are only hidden on a strong id match, never a weak one. */
+    private static final Set<String> STRONG_AD_WORDS = Collections.unmodifiableSet(
+            new HashSet<>(Arrays.asList(
+                    "nativead", "splashad", "bannerad", "feedad", "adview", "adcontainer",
+                    "adlayout", "adbanner", "adslot", "adholder", "adwrapper", "adframe",
+                    "admask", "nativeadview", "rewarded"
+            )));
 
     private static final String[] AD_HOSTS = {
             "doubleclick.net", "googleadservices.com", "googlesyndication.com",
@@ -144,16 +156,33 @@ public class MeloloAdStrip implements IXposedHookLoadPackage {
 
     /* ---------------------------------------------------------------- layer 1 */
 
+    /**
+     * Ad views are collapsed in place, never refused. A refused addView makes the
+     * caller's layout miss a child it later looks up by id, and that is an
+     * immediate NullPointerException during inflation.
+     */
     private void hookAddView() {
         XC_MethodHook h = new XC_MethodHook() {
             @Override
             protected void beforeHookedMethod(MethodHookParam p) {
                 if (p.args == null || p.args.length == 0) return;
                 if (!(p.args[0] instanceof View)) return;
-                View v = (View) p.args[0];
+                final View v = (View) p.args[0];
                 if (!isAdView(v)) return;
-                if (LOG_DISCOVERY) log("blocked view: " + v.getClass().getName());
-                p.setResult(null);
+                if (LOG_DISCOVERY) log("hid view: " + describe(v));
+                try {
+                    v.setVisibility(View.GONE);
+                } catch (Throwable ignored) {
+                }
+                try {
+                    v.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            collapse(v);
+                        }
+                    });
+                } catch (Throwable ignored) {
+                }
             }
         };
         XposedBridge.hookAllMethods(ViewGroup.class, "addView", h);
@@ -178,8 +207,8 @@ public class MeloloAdStrip implements IXposedHookLoadPackage {
     private static void strip(View v, int depth) {
         if (v == null || depth > 40) return;
         if (depth > 0 && isAdView(v)) {
-            v.setVisibility(View.GONE);
-            if (LOG_DISCOVERY) log("hid view: " + v.getClass().getName());
+            if (LOG_DISCOVERY) log("hid swept view: " + describe(v));
+            collapse(v);
         }
         if (v instanceof ViewGroup) {
             ViewGroup g = (ViewGroup) v;
@@ -193,24 +222,79 @@ public class MeloloAdStrip implements IXposedHookLoadPackage {
         }
     }
 
+    /** Zero size and invisible, but still a child: findViewById keeps working. */
+    private static void collapse(View v) {
+        try {
+            v.setVisibility(View.GONE);
+            ViewGroup.LayoutParams lp = v.getLayoutParams();
+            if (lp != null && (lp.width != 0 || lp.height != 0)) {
+                lp.width = 0;
+                lp.height = 0;
+                v.setLayoutParams(lp);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
     private static boolean isAdView(View v) {
         if (v == null) return false;
         String cls = v.getClass().getName();
         if (isExcluded(cls)) return false;
-        if (isAdClassName(cls)) return true;
 
+        if (startsWithAny(cls, SDK_PACKAGES)) return true;
+        if (startsWithAny(cls, APP_AD_PACKAGES)) return true;
+        if (hasAnyWord(classNameOf(cls), AD_WORDS)) return true;
+
+        // Id fallback. Containers can be matched on any ad word; a bare TextView
+        // or ImageView only on a strong one, otherwise real UI gets hidden.
         int id = v.getId();
         if (id == View.NO_ID) return false;
+        String name;
         try {
-            String name = v.getResources().getResourceEntryName(id);
-            if (name == null) return false;
-            String low = name.toLowerCase(Locale.ROOT);
-            for (String k : AD_ID_KEYWORDS) {
-                if (low.contains(k)) return true;
-            }
-        } catch (Throwable ignored) {
+            name = v.getResources().getResourceEntryName(id);
+        } catch (Throwable t) {
+            return false;
+        }
+        if (name == null) return false;
+        Set<String> words = wordsOf(name);
+        if (hasAnyWord(words, AD_WORDS)) {
+            if (v instanceof ViewGroup) return true;
+            return hasAnyWord(words, STRONG_AD_WORDS);
         }
         return false;
+    }
+
+    private static String classNameOf(String fqcn) {
+        int i = fqcn.lastIndexOf('.');
+        return i < 0 ? fqcn : fqcn.substring(i + 1);
+    }
+
+    private static Set<String> wordsOf(String raw) {
+        String low = raw.toLowerCase(Locale.ROOT);
+        String[] parts = low.split("[^a-z0-9]+");
+        return new HashSet<>(Arrays.asList(parts));
+    }
+
+    private static boolean hasAnyWord(String name, Set<String> words) {
+        return hasAnyWord(wordsOf(name), words);
+    }
+
+    private static boolean hasAnyWord(Set<String> tokens, Set<String> words) {
+        for (String t : tokens) {
+            if (t.isEmpty()) continue;
+            if (words.contains(t)) return true;
+        }
+        return false;
+    }
+
+    private static String describe(View v) {
+        String id = "?";
+        try {
+            int rid = v.getId();
+            if (rid != View.NO_ID) id = v.getResources().getResourceEntryName(rid);
+        } catch (Throwable ignored) {
+        }
+        return v.getClass().getName() + " id=" + id;
     }
 
     /* ---------------------------------------------------------------- layer 2 */
@@ -359,16 +443,6 @@ public class MeloloAdStrip implements IXposedHookLoadPackage {
     }
 
     /* ---------------------------------------------------------------- helpers */
-
-    private static boolean isAdClassName(String fqcn) {
-        if (startsWithAny(fqcn, APP_AD_PACKAGES)) return true;
-        if (startsWithAny(fqcn, SDK_PACKAGES)) return true;
-        String low = fqcn.toLowerCase(Locale.ROOT);
-        for (String k : AD_CLASS_KEYWORDS) {
-            if (low.contains(k)) return true;
-        }
-        return false;
-    }
 
     private static boolean startsWithAny(String s, String[] prefixes) {
         for (String p : prefixes) {

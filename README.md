@@ -10,10 +10,49 @@ Four independent layers, each works on its own:
 
 | Layer | Mechanism | Result |
 |---|---|---|
-| View killer | hooks `ViewGroup.addView` / `addViewInLayout`, drops ad views before layout; `Activity.onResume` sweeps leftovers to `GONE` | ad views never render |
+| View hider | hooks `ViewGroup.addView` / `addViewInLayout`, collapses ad views to `0x0` + `GONE`; `Activity.onResume` sweeps leftovers | ad views never render, layout stays intact |
 | SDK neuter | hooks `ClassLoader.loadClass`, neuters `load*` / `show*` / `preload*` / `request*` on ad SDK classes | ads never fill |
 | Host sink | hooks `InetAddress.getByName` / `getAllByName`, returns `127.0.0.1` for known ad domains | ad creatives never download |
 | Discovery | logs every matched class to `LSPosed-Bridge` | makes the keyword lists growable |
+
+## Changelog
+
+### v1.1 — Play Store build fix (Android 17)
+
+v1.0 refused `addView` outright. On Melolo 5.5.2 from Play Store that is a hard crash:
+
+```
+java.lang.NullPointerException: findViewById(...) must not be null
+    at com.worldance.novel.feature.series.layer.mask.SeriesContentMaskView.<init>
+    at com.dragon.read.component.shortvideo.impl.v2.view.holder.CommonShortVideoHolder.<init>
+```
+
+Cause: the view that got dropped was
+
+```
+ollie-melolo blocked view: com.worldance.novel.platform.baseres.widget.textview.TypefaceTextView
+```
+
+— not an ad at all. Its resource id matched the substring rule `_ad` / `ad_`. `SeriesContentMaskView`
+inflates a layout and then calls `findViewById` on that child, so removing it from the hierarchy
+threw during `RecyclerView` item creation.
+
+Two fixes:
+
+1. **Never refuse a view.** Ad views are collapsed in place (`GONE`, layout params `0x0`). They are
+   still children, so `findViewById` keeps working; they just occupy nothing and render nothing.
+2. **Word matching, not substring.** Class names and resource ids are split on non-alphanumerics and
+   compared against a word set (`ad`, `adview`, `nativead`, `splashad`, ...). Bare `TextView` /
+   `ImageView` are only hidden on a strong id word (`nativeadview`, `adcontainer`, ...); containers
+   match on any ad word.
+
+Verified on Melolo 5.5.2 (`com.android.vending` install), Android 17, KernelSU + LSPosed: cold start,
+feed scroll, episode list, `ShortSeriesActivity` player, 6 episode swipes — no crash, no ad SDK
+traffic, no false-positive view hits.
+
+### v1.0 — initial
+
+Four layers as described above. Verified against Melolo 5.5.1 sideload on Android 16.
 
 ## What the app actually ships
 
