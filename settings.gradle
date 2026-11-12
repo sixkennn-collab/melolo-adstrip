@@ -1,0 +1,21 @@
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+        // legacy Xposed API 82. If this repo 404s, drop api-82.jar into app/libs/
+        // and swap the dependency to compileOnly files('libs/api-82.jar')
+        maven { url 'https://api.xposed.info/' }
+    }
+}
+
+rootProject.name = "melolo-adstrip"
+include ':app'

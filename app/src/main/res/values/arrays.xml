@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- must stay in sync with MeloloAdStrip.TARGETS -->
+    <string-array name="xposedscope">
+        <item>com.worldance.drama</item>
+    </string-array>
+</resources>

@@ -1,0 +1,19 @@
+# build output
+build/
+app/build/
+.gradle/
+local.properties
+
+# local toolchain (gradle dist, keystore, pulled apks, patched apks)
+.dist/
+
+# signing material — never commit
+*.keystore
+*.jks
+*.apk
+!app/src/**/assets/*.apk
+
+# ide
+.idea/
+*.iml
+.DS_Store
