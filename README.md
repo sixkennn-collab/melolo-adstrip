@@ -65,6 +65,10 @@ gradle assembleRelease
 
 Output: `app/build/outputs/apk/release/app-release-unsigned.apk`
 
+CI: `docs/ci-build.yml` is a ready GitHub Actions workflow. GitHub rejects workflow files pushed
+by a device-flow token without the `workflow` scope, so copy it to `.github/workflows/build.yml`
+through the web UI (or re-auth with `gh auth refresh -s workflow`) to enable it.
+
 Sign it before installing:
 
 ```bash
